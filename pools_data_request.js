@@ -3,7 +3,10 @@ const fs = require('fs');
 const { parse } = require('csv-parse');
 const createCsvWriter = require('csv-writer').createObjectCsvWriter;
 
-const poolFile = './data/pools.csv';  // Ensure the path is relative and correct
+const poolFile = './data/pools.csv';  // file with pools
+
+
+//this function is using DeFiLamaAPI
 
 async function fetchPoolData(poolId) {
     const url = `https://yields.llama.fi/chart/${poolId}`;
@@ -19,8 +22,8 @@ async function fetchPoolData(poolId) {
             const apy = lastDataPoint.apy || 'No APY Data';  // Default if APY is missing
 
             return {
-                rating: (tvlUsd * diffDays).toString(),  // Calculate rating
-                apy: apy.toString()  // Store APY value
+                rating: (tvlUsd * diffDays).toString(),  // rating calcualtion
+                apy: apy.toString()  // storing APY value
             };
         }
         return { rating: 'No data available', apy: 'No APY Data' };  // Defaults if no data
@@ -34,7 +37,9 @@ async function fetchPoolData(poolId) {
 }
 
 async function updateRatings() {
+
     const inputData = fs.readFileSync(poolFile, { encoding: 'utf8' });
+    
     parse(inputData, {
         columns: true,
         trim: true,
@@ -80,5 +85,5 @@ async function updateRatings() {
     });
 }
 
-// Directly calling the function if this script is run from the command line
+// direct call the function if this script is run from the command line
 updateRatings();

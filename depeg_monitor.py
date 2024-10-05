@@ -1,16 +1,15 @@
-# depeg-monitor.py
-
-import requests
 import time
 import json
 import logging
-from telegram.ext import Application
 import asyncio
+import requests
+from telegram.ext import Application
 
-# Setup logging
+# Standart logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Configuration
+# Dexscreener API
+# Here we get info about DEX Pair each 10 sec and storing 100 last updates
 pairs_config_path = 'depeg_tracking.json'
 API_URL = "https://api.dexscreener.com/latest/dex/search"
 MAX_HISTORY_SIZE = 100
@@ -37,6 +36,8 @@ def load_pairs():
         logging.error(f"Error decoding JSON from the file: {pairs_config_path}")
         exit(1)
 
+
+# List where we're storing history of DEX pairs
 price_histories = {pair: [] for pair in load_pairs()}
 
 def fetch_current_price(pair):
@@ -58,6 +59,8 @@ def update_price_history(pair, price):
         history.pop(0)
     history.append(price)
 
+
+# Calcualting average for the pair form the price_histories
 def calculate_average(history):
     return sum(history) / len(history) if history else 0
 
@@ -66,7 +69,7 @@ def calculate_deviation(current_price, average_price):
 
 def monitor_depeg(bot_message_callback, loop):
     global monitoring_active
-    monitoring_active = True  # Explicitly set to True to ensure it starts correctly.
+    monitoring_active = True  # Set to True to ensure it starts correctly.
     
     while monitoring_active:
         pairs = load_pairs()  # Ensure the latest pairs are used
@@ -75,15 +78,19 @@ def monitor_depeg(bot_message_callback, loop):
             logging.info(f"Checking price for {pair}.")
             try:
                 current_price = fetch_current_price(pair)
+
                 if current_price is not None:
                     logging.info(f"Price for {pair}: {current_price}")
                     update_price_history(pair, current_price)
+
                     history = price_histories[pair]
                     average_price = calculate_average(history)
+
                     deviation = calculate_deviation(current_price, average_price)
                     logging.info(f"{pair}: Current Price = {current_price}, Average = {average_price}, Deviation = {deviation:.2%}")
                     
-                    if deviation <= -0.01:  # Lowered threshold for testing
+                    if deviation <= -0.01:  # Deviation of -1% considers as a depeg of an asset
+                        
                         message = f"Depeg detected! {pair} has deviated by {deviation:.2%} from the average."
                         logging.info(f"Notification triggered for {pair}: {message}")
                         asyncio.run_coroutine_threadsafe(bot_message_callback(message), loop)

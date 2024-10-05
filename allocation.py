@@ -1,12 +1,12 @@
 #allocation.py
 import os
 import sys
-import numpy as np
-from scipy.optimize import minimize
-import pandas as pd
 import logging
+import numpy as np
+import pandas as pd
 
-# Setup basic logging
+from scipy.optimize import minimize
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 allocation = 10000000
@@ -66,7 +66,7 @@ def save_allocation_summary_to_csv(summary, output_filepath):
     logging.info(f"Allocation summary saved to {output_filepath}")
 
 def main():
-    """Main function to load data, perform calculations, and save summary to CSV."""
+
     filepath = './data/pools.csv'
     protocols_filepath = './data/protocols.csv'
     output_filepath = 'allocation_summary.csv'
@@ -83,6 +83,9 @@ def main():
         tier_df = load_data(protocols_filepath)
         protocols_df = protocols_df.merge(tier_df, on='Protocol', how='left')
 
+        # Allocation according to the Tiers of Protocol
+        # Rules are in allocation_rules.xlsx
+
         tier_allocations = {
             1: 0.5 * total_allocation,
             2: 0.3 * total_allocation,
@@ -93,30 +96,38 @@ def main():
         all_results = []
 
         for tier, group in protocols_df.groupby('Tier'):
+
             n = len(group)
+
             initial_weights = np.ones(n) / n
+
             constraints, bounds = define_constraints(n)
+
             inverted_risk_scores = calculate_inverted_risk_scores(group['StrategyRating'].values)
+
             Sigma = create_risk_matrix(inverted_risk_scores)
+
             Sigma_norm = normalize_risk_matrix(Sigma)
+
             optimal_weights = optimize_weights(Sigma_norm, initial_weights, tier_allocations[tier], constraints, bounds)
+
             group['Allocation ($)'] = optimal_weights
-            group['Weight (%)'] = 100 * optimal_weights / total_allocation  # Adjusting weights relative to total allocation
+            group['Weight (%)'] = 100 * optimal_weights / total_allocation
+            
             all_results.append(group[['Strategy', 'Protocol', 'ROI', 'Allocation ($)', 'Weight (%)']])
 
         final_summary = pd.concat(all_results).sort_values(by='Weight (%)', ascending=False)
 
-        # Ensure ROI is string before stripping '%' and converting to float
         final_summary['ROI'] = pd.to_numeric(final_summary['ROI'])
 
-        # Convert Weight (%) to numeric
+        # Converting Weight (%) to numeric
         final_summary['Weight (%)'] = pd.to_numeric(final_summary['Weight (%)'])
 
-        # Calculate the weighted average ROI
+        # Calculating the weighted average ROI
         weighted_roi = (final_summary['ROI'] * final_summary['Weight (%)']).sum() / 100  # Calculate weighted average ROI
         logging.info(f"Weighted Average ROI: {weighted_roi:.2f}")
 
-        # Save the summary to CSV
+        # Saving the summary to CSV
         save_allocation_summary_to_csv(final_summary, output_filepath)
 
     except Exception as e:

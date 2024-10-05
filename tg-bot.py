@@ -1,21 +1,28 @@
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackContext, filters
 import os
 import csv
-import subprocess
-import logging
-from config import BOT_TOKEN
-from threading import Thread
-from depeg_monitor import load_pairs, monitor_depeg, stop_monitoring
 import asyncio
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import CallbackQueryHandler
+import logging
+import subprocess
 
-# Setup basic logging
+from config import BOT_TOKEN
+
+from threading import Thread
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackContext, filters, CallbackQueryHandler
+
+from depeg_monitor import monitor_depeg
+
+# basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-allocation_file_path = os.path.join(os.getcwd(), 'allocation.py')  # Ensure correct path
-pools_path = os.path.join('data', 'pools.csv')  # Check that 'data' directory exists and is writable
+# allocation where to save calcualtions
+allocation_file_path = os.path.join(os.getcwd(), 'allocation.py')
+
+#file with pools
+pools_path = os.path.join('data', 'pools.csv')  # pools location
+
+# Logo Path
+logo_path = 'telegram-pic.jpg'
 
 async def start(update: Update, context: CallbackContext) -> None:
     keyboard = [
@@ -24,25 +31,22 @@ async def start(update: Update, context: CallbackContext) -> None:
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Image file path
-    logo_path = 'telegram-pic.jpg'  # Ensure the file is in the correct directory
-
-    # Check if it's from a button press or a command
+    # checking if it's from a button press or a command
     if update.message:
-        # Send the image first
-        await update.message.reply_photo(photo=open(logo_path, 'rb'))  # Sending the image
-        # Then send the main menu
+      
+        await update.message.reply_photo(photo=open(logo_path, 'rb'))  # sending imagae first
+       
         await update.message.reply_text(
             "Management Bot",
-            reply_markup=reply_markup
+            reply_markup=reply_markup # after sending menu
         )
     elif update.callback_query:
-        # Send the image first
-        await update.callback_query.message.reply_photo(photo=open(logo_path, 'rb'))  # Sending the image
-        # Then send the main menu
+        
+        await update.callback_query.message.reply_photo(photo=open(logo_path, 'rb'))  # sending image first
+       
         await update.callback_query.message.reply_text(
             "Management Bot",
-            reply_markup=reply_markup
+            reply_markup=reply_markup # after sending menu
         )
 
 async def button(update: Update, context: CallbackContext) -> None:
@@ -51,6 +55,9 @@ async def button(update: Update, context: CallbackContext) -> None:
 
     if query.data == 'depeg_control':
         keyboard = [
+
+            # buttons in the bot to work with Depeg Control
+
             [InlineKeyboardButton("🔍 Start Control", callback_data='start_depeg')],
             [InlineKeyboardButton("⛔ Stop Control", callback_data='stop_depeg')],
             [InlineKeyboardButton("🔄 Change Pairs", callback_data='change_depeg')],
@@ -61,6 +68,9 @@ async def button(update: Update, context: CallbackContext) -> None:
 
     elif query.data == 'defi_allocation':
         keyboard = [
+
+            # buttons in the bot to work with Allocation Calcualtor
+
             [InlineKeyboardButton("⚙️ Start Calculation", callback_data='run_scripts')],
             [InlineKeyboardButton("📋 Show Allocation", callback_data='show_allocation')],
             [InlineKeyboardButton("💰 Change the Amount", callback_data='change_allocation')],
@@ -70,11 +80,11 @@ async def button(update: Update, context: CallbackContext) -> None:
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.edit_text("📊 DeFi Allocation Calculator:", reply_markup=reply_markup)
 
-    # You can add additional logic for handling back to the main menu
+    # back to main menu logic 
     elif query.data == 'main_menu':
-        await start(update, context)  # Redirect to the main menu
+        await start(update, context)
 
-    # Other elif blocks remain the same
+    # elifs for Depeg
 
     elif query.data == 'start_depeg':
         await query.message.reply_text('Depeg monitoring has started.')
@@ -88,6 +98,8 @@ async def button(update: Update, context: CallbackContext) -> None:
         await query.message.reply_text('Please upload a new JSON file to update the depeg tracking configuration.')
         await change_depeg(update, context)
 
+     # elifs Allocation Calcualtor
+
     elif query.data == 'run_scripts':
         await run_scripts(update, context)
 
@@ -100,100 +112,11 @@ async def button(update: Update, context: CallbackContext) -> None:
     elif query.data == 'change_pools':
         await change_pools(update, context)
 
-    elif query.data == 'start_depeg':
-        await depeg(update, context)
-
-    elif query.data == 'stop_depeg':
-        await stop_depeg(update, context)
-
-    elif query.data == 'change_depeg':
-        await change_depeg(update, context)
-
-    elif query.data == 'run_scripts':
-        await run_scripts(update, context)
-
-    elif query.data == 'show_allocation':
-        await show_allocation(update, context)
-
-    elif query.data == 'change_allocation':
-        await update.message.reply_text('Please use the command /allocation <amount> to set a new total allocation.')
-
-    elif query.data == 'change_pools':
-        await change_pools(update, context)
-
-    elif query.data == 'main_menu':
-        await start(update, context)
-
-async def handle_depeg_control(update: Update, context: CallbackContext, query_data) -> None:
-    if query_data == 'start_depeg':
-        await depeg(update, context)
-    elif query_data == 'stop_depeg':
-        await stop_depeg(update, context)
-    elif query_data == 'change_depeg':
-        await change_depeg(update, context)
-
-async def show_allocation(update: Update, context: CallbackContext) -> None:
-    """Send a message with the allocation summary."""
-    try:
-        with open('allocation_summary.csv', newline='') as csvfile:
-            reader = csv.reader(csvfile)
-            headers = next(reader)  # Skip the header
-            table_data = [f"[{index + 1}] {' | '.join(row)}" for index, row in enumerate(reader)]
-        formatted_table = " | ".join(headers) + "\n" + "\n" + "\n".join(table_data)
-        
-        if update.message:
-            await update.message.reply_text(formatted_table)
-        elif update.callback_query:
-            await update.callback_query.message.reply_text(formatted_table)
-    except Exception as e:
-        if update.message:
-            await update.message.reply_text(f"An error occurred while reading the allocation summary: {str(e)}")
-        elif update.callback_query:
-            await update.callback_query.message.reply_text(f"An error occurred while reading the allocation summary: {str(e)}")
-
-
-async def run_scripts(update: Update, context: CallbackContext) -> None:
-    if update.message:
-        await update.message.reply_text('Running scripts... Please wait.')
-    elif update.callback_query:
-        await update.callback_query.message.reply_text('Running scripts... Please wait.')
-
-    try:
-        # Adding log to verify if the file exists and its last modified time
-        pools_path = os.path.join('data', 'pools.csv')
-        if os.path.exists(pools_path):
-            logging.info(f"{pools_path} last modified at: {os.path.getmtime(pools_path)}")
-        
-        result = subprocess.run(["python3", "run.py"], capture_output=True, text=True)
-        response_message = result.stdout if result.stdout else result.stderr
-
-        if update.message:
-            await update.message.reply_text(f"Script executed:\n{response_message}")
-        elif update.callback_query:
-            await update.callback_query.message.reply_text(f"Script executed:\n{response_message}")
-        
-        await show_allocation(update, context)
-    except Exception as e:
-        if update.message:
-            await update.message.reply_text(f"An error occurred: {str(e)}")
-        elif update.callback_query:
-            await update.callback_query.message.reply_text(f"An error occurred: {str(e)}")
-
-async def change_pools(update: Update, context: CallbackContext) -> None:
-    """Prompt the user to send a new CSV file to update the pools."""
-    if update.message:
-        await update.message.reply_text('Please upload a new CSV file to update the pools.')
-    elif update.callback_query:
-        await update.callback_query.message.reply_text('Please upload a new CSV file to update the pools.')
+# functions for Depeg Contorol
 
 monitoring_thread = None
 monitoring_active = False
-monitoring_callback_attached = False  # Add this to manage the callback
-
-# Command to start depeg monitoring
-monitoring_thread = None
-monitoring_active = False
-monitoring_callback_attached = False  # Add this to manage the callback
+monitoring_callback_attached = False
 
 async def depeg(update: Update, context: CallbackContext) -> None:
     global monitoring_thread, monitoring_active, monitoring_callback_attached
@@ -209,7 +132,6 @@ async def depeg(update: Update, context: CallbackContext) -> None:
     loop = asyncio.get_running_loop()
 
     if not monitoring_callback_attached:
-        # Define async message callback
         async def send_message_async(message: str):
             try:
                 if update.callback_query:
@@ -252,48 +174,41 @@ async def stop_depeg(update: Update, context: CallbackContext) -> None:
         monitoring_thread.join()
         monitoring_thread = None
 
-    # Removed reply message here
+async def handle_depeg_control(update: Update, context: CallbackContext, query_data) -> None:
+    if query_data == 'start_depeg':
+        await depeg(update, context)
+    elif query_data == 'stop_depeg':
+        await stop_depeg(update, context)
+    elif query_data == 'change_depeg':
+        await change_depeg(update, context)
 
-async def handle_document(update: Update, context: CallbackContext) -> None:
-    """Handle document uploads based on file extension."""
-    document = update.message.document
-    file_extension = document.file_name.split('.')[-1].lower()
+# functions for Allocation Calcualtor
 
-    if file_extension == 'csv':
-        await process_csv_document(update, context, document)
-    elif file_extension == 'json':
-        await process_json_document(update, context, document)
-    else:
-        await update.message.reply_text('Unsupported file type. Please upload a CSV or JSON file.')
-        pass
-
-async def process_csv_document(update: Update, context: CallbackContext, document):
-    """Process CSV documents."""
-    new_file = await context.bot.get_file(document.file_id)
-    new_file_path = os.path.join('data', 'pools.csv')
+async def show_allocation(update: Update, context: CallbackContext) -> None:
+    """Send a message with the allocation summary."""
     try:
-        # Correct method for downloading files in version 20+
-        await new_file.download_to_drive(custom_path=new_file_path)
-        # Add your existing CSV processing logic here
-        await update.message.reply_text('CSV file updated successfully.')
+        with open('allocation_summary.csv', newline='') as csvfile:
+            reader = csv.reader(csvfile)
+            headers = next(reader)  # Skip the header
+            table_data = [f"[{index + 1}] {' | '.join(row)}" for index, row in enumerate(reader)]
+        formatted_table = " | ".join(headers) + "\n" + "\n" + "\n".join(table_data)
+        
+        if update.message:
+            await update.message.reply_text(formatted_table)
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(formatted_table)
     except Exception as e:
-        await update.message.reply_text(f"An error occurred: {str(e)}")
+        if update.message:
+            await update.message.reply_text(f"An error occurred while reading the allocation summary: {str(e)}")
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(f"An error occurred while reading the allocation summary: {str(e)}")
 
-async def process_json_document(update: Update, context: CallbackContext, document):
-    """Process JSON documents."""
-    new_file = await context.bot.get_file(document.file_id)
-    new_file_path = os.path.join(os.getcwd(), 'depeg_tracking.json')
-    try:
-        # Correct method for downloading files in version 20+
-        await new_file.download_to_drive(custom_path=new_file_path)
-
-        # After downloading, reload the pairs and reset the price histories
-        pairs = load_pairs()
-        logging.info(f"New pairs loaded from updated JSON: {pairs}")
-        await update.message.reply_text('JSON file updated successfully, and pairs have been reloaded.')
-    except Exception as e:
-        logging.error(f"Error processing JSON document: {str(e)}")
-        await update.message.reply_text(f"An error occurred while processing the JSON file: {str(e)}")
+async def change_pools(update: Update, context: CallbackContext) -> None:
+    """Prompt the user to send a new CSV file to update the pools."""
+    if update.message:
+        await update.message.reply_text('Please upload a new CSV file to update the pools.')
+    elif update.callback_query:
+        await update.callback_query.message.reply_text('Please upload a new CSV file to update the pools.')
 
 async def set_allocation(update: Update, context: CallbackContext) -> None:
     """Set a new total allocation in allocation.py."""
@@ -339,20 +254,96 @@ async def set_allocation(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text(f"An error occurred while setting the allocation: {str(e)}")
         pass
 
+async def run_scripts(update: Update, context: CallbackContext) -> None:
+    if update.message:
+        await update.message.reply_text('Running scripts... Please wait.')
+    elif update.callback_query:
+        await update.callback_query.message.reply_text('Running scripts... Please wait.')
+
+    try:
+        # Adding log to verify if the file exists and its last modified time
+        pools_path = os.path.join('data', 'pools.csv')
+        if os.path.exists(pools_path):
+            logging.info(f"{pools_path} last modified at: {os.path.getmtime(pools_path)}")
+        
+        result = subprocess.run(["python3", "run.py"], capture_output=True, text=True)
+        response_message = result.stdout if result.stdout else result.stderr
+
+        if update.message:
+            await update.message.reply_text(f"Script executed:\n{response_message}")
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(f"Script executed:\n{response_message}")
+        
+        await show_allocation(update, context)
+    except Exception as e:
+        if update.message:
+            await update.message.reply_text(f"An error occurred: {str(e)}")
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(f"An error occurred: {str(e)}")
+
+
+# documents handling
+
+async def handle_document(update: Update, context: CallbackContext) -> None:
+    """Handle document uploads based on file extension."""
+    document = update.message.document
+    file_extension = document.file_name.split('.')[-1].lower()
+
+    if file_extension == 'csv':
+        await process_csv_document(update, context, document)
+    elif file_extension == 'json':
+        await process_json_document(update, context, document)
+    else:
+        await update.message.reply_text('Unsupported file type. Please upload a CSV or JSON file.')
+        pass
+
+async def process_csv_document(update: Update, context: CallbackContext, document):
+    """Process CSV documents."""
+    new_file = await context.bot.get_file(document.file_id)
+    new_file_path = os.path.join('data', 'pools.csv')
+    try:
+        # Correct method for downloading files in version 20+
+        await new_file.download_to_drive(custom_path=new_file_path)
+        # Add your existing CSV processing logic here
+        await update.message.reply_text('CSV file updated successfully.')
+    except Exception as e:
+        await update.message.reply_text(f"An error occurred: {str(e)}")
+
+async def process_json_document(update: Update, context: CallbackContext, document):
+    """Process JSON documents."""
+    new_file = await context.bot.get_file(document.file_id)
+    new_file_path = os.path.join(os.getcwd(), 'depeg_tracking.json')
+    try:
+        # Correct method for downloading files in version 20+
+        await new_file.download_to_drive(custom_path=new_file_path)
+
+        # After downloading, reload the pairs and reset the price histories
+        pairs = load_pairs()
+        logging.info(f"New pairs loaded from updated JSON: {pairs}")
+        await update.message.reply_text('JSON file updated successfully, and pairs have been reloaded.')
+    except Exception as e:
+        logging.error(f"Error processing JSON document: {str(e)}")
+        await update.message.reply_text(f"An error occurred while processing the JSON file: {str(e)}")
+
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Handlers for Commands
     app.add_handler(CommandHandler("start", start))
+
+    # Handlers for Depeg
+
+    app.add_handler(CommandHandler("depeg", depeg))
+    app.add_handler(CommandHandler("stop_depeg", stop_depeg))
+    app.add_handler(CommandHandler("change_depeg", change_depeg))
+
+    # Handlers for Allocation Calculator
+
     app.add_handler(CommandHandler("run", run_scripts))
     app.add_handler(CommandHandler("show_allocation", show_allocation))
     app.add_handler(CommandHandler("change_pools", change_pools))
     app.add_handler(CommandHandler("allocation", set_allocation))
-    app.add_handler(CommandHandler("depeg", depeg))
-    app.add_handler(CommandHandler("stop_depeg", stop_depeg))
-    app.add_handler(CommandHandler("change_depeg", change_depeg))
     
-    # Document Handlers
+    # Document handler
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
     # Button handler
