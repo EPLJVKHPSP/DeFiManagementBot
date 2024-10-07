@@ -40,7 +40,7 @@ async def start(update: Update, context: CallbackContext) -> None:
     keyboard = [
         [InlineKeyboardButton("🛡️ Assets Depeg Control", callback_data='depeg_control')],
         [InlineKeyboardButton("📊 DeFi Allocation Calculator", callback_data='defi_allocation')],
-        [InlineKeyboardButton("📉 Impairment Loss Prediction", callback_data='il_calculation')]
+        [InlineKeyboardButton("📉 Impermanent Prediction", callback_data='il_calculation')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
