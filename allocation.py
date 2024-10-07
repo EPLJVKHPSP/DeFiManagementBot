@@ -9,7 +9,7 @@ from scipy.optimize import minimize
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-allocation = 10000000
+allocation = 10000
 
 def load_data(filepath):
     """Load data from CSV."""
