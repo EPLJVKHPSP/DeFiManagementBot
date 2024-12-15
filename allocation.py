@@ -1,37 +1,36 @@
-#allocation.py
-import os
-import sys
 import logging
 import numpy as np
 import pandas as pd
+from db_util import fetch_query, get_connection
 
-from scipy.optimize import minimize
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-allocation = 10000
-
-def load_data(filepath):
-    """Load data from CSV."""
+def load_data_from_db(query, params=None):
+    """Executes a SQL query and returns the result as a Pandas DataFrame."""
     try:
-        data = pd.read_csv(filepath)
-        logging.info(f"Loaded data from {filepath}")
-        return data
+        logging.info(f"Executing query: {query}")
+        result = fetch_query(query, params)
+        if not result:
+            logging.warning("Query returned no results.")
+            return pd.DataFrame()
+        return pd.DataFrame(result)
     except Exception as e:
-        logging.error(f"Error loading data from {filepath}: {e}")
-        raise
+        logging.error(f"Failed to load data from database: {e}")
+        return pd.DataFrame()
+
 
 def calculate_inverted_risk_scores(ratings):
     """Calculate inverted risk scores from ratings."""
     return 1 / ratings
 
+
 def create_risk_matrix(inverted_risk_scores):
     """Create diagonal risk matrix from inverted risk scores."""
     return np.diag(inverted_risk_scores)
 
+
 def normalize_risk_matrix(Sigma):
     """Normalize the risk matrix."""
     return Sigma / np.linalg.norm(Sigma)
+
 
 def define_constraints(n):
     """Define optimization constraints and bounds."""
@@ -39,99 +38,157 @@ def define_constraints(n):
     bounds = [(0, 1) for _ in range(n)]
     return constraints, bounds
 
+
 def optimize_weights(Sigma_norm, initial_weights, total_allocation, constraints, bounds):
     """Optimize weights to minimize variance of risk contributions."""
-    result = minimize(variance_risk_contributions, initial_weights, args=(Sigma_norm,),
-                      method='SLSQP', bounds=bounds, constraints=constraints)
-    optimal_weights = result.x
-    return optimal_weights * total_allocation
+    from scipy.optimize import minimize
 
-def variance_risk_contributions(weights, Sigma):
-    """Calculate the variance of risk contributions."""
-    contributions = risk_contributions(weights, Sigma)
-    return np.var(contributions)
+    def variance_risk_contributions(weights, Sigma):
+        total_risk = np.dot(weights, np.dot(Sigma, weights))
+        marginal_contributions = np.dot(Sigma, weights)
+        return np.var(weights * marginal_contributions / total_risk)
 
-def risk_contributions(weights, Sigma):
-    """Calculate risk contributions for given weights."""
-    total_risk = np.dot(weights, np.dot(Sigma, weights))
-    marginal_contributions = np.dot(Sigma, weights)
-    return weights * marginal_contributions / total_risk
+    result = minimize(
+        variance_risk_contributions,
+        initial_weights,
+        args=(Sigma_norm,),
+        method='SLSQP',
+        bounds=bounds,
+        constraints=constraints
+    )
+    if not result.success:
+        logging.warning(f"Optimization did not converge: {result.message}. Using initial weights.")
+        return initial_weights * total_allocation
+    return result.x * total_allocation
 
-def save_allocation_summary_to_csv(summary, output_filepath):
-    """Save the allocation summary to a CSV file formatted to two decimal places."""
-    summary['Allocation ($)'] = summary['Allocation ($)'].apply(lambda x: f"{x:.2f}")
-    summary['Weight (%)'] = summary['Weight (%)'].apply(lambda x: f"{x:.2f}")
 
-    summary.to_csv(output_filepath, index=False)
-    logging.info(f"Allocation summary saved to {output_filepath}")
+def redistribute_tiers(tier_allocations, ratings_df, global_limit, max_tier_limits):
+    """Redistribute tier allocations dynamically based on available tiers."""
+    available_tiers = ratings_df['tier'].unique()
+    missing_tiers = {tier for tier in tier_allocations if tier not in available_tiers}
+    redistribute_percentage = sum(tier_allocations[tier] for tier in missing_tiers)
+    
+    total_ratings = ratings_df.groupby('tier')['strategy_rating'].sum()
+    total_ratings_all_tiers = total_ratings.sum()
+
+    if total_ratings_all_tiers > 0:
+        for tier in available_tiers:
+            tier_allocations[tier] += (
+                redistribute_percentage * (total_ratings[tier] / total_ratings_all_tiers)
+            )
+            tier_allocations[tier] = min(tier_allocations[tier], global_limit * max_tier_limits[tier])
+    
+    return tier_allocations
+
+
+def save_allocation_to_db(summary):
+    """Save the allocation summary into the database."""
+    try:
+        conn = get_connection()
+        with conn.cursor() as cursor:
+            cursor.execute("TRUNCATE TABLE ratings.allocation_summary;")
+            for _, row in summary.iterrows():
+                cursor.execute(
+                    """
+                    INSERT INTO ratings.allocation_summary (strategy, protocol, roi, allocation, weight)
+                    VALUES (%s, %s, %s, %s, %s);
+                    """,
+                    (row['Strategy'], row['protocol_name'], row['roi'], row['Allocation ($)'], row['Weight (%)']),
+                )
+            conn.commit()
+        logging.info("Allocation summary saved to database.")
+    except Exception as e:
+        logging.error(f"Error saving allocation summary to database: {e}")
+        raise
+
 
 def main():
-
-    filepath = './data/pools.csv'
-    protocols_filepath = './data/protocols.csv'
+    pools_query = "SELECT * FROM ratings.pools;"
+    protocols_query = "SELECT protocol_name, tier FROM ratings.protocols;"
     output_filepath = 'allocation_summary.csv'
-    total_allocation = allocation
+    global_limit = 200000  # Global investment limit
 
     try:
-        protocols_df = load_data(filepath)
+        logging.info("Loading data from database...")
+        protocols_df = load_data_from_db(pools_query)
+        tier_df = load_data_from_db(protocols_query)
+
+        # Log column names for debugging
+        logging.info(f"Columns in protocols_df: {protocols_df.columns}")
+        logging.info(f"Columns in tier_df: {tier_df.columns}")
+
+        if protocols_df.empty or tier_df.empty:
+            logging.error("One or both DataFrames are empty. Exiting.")
+            return
+
+        # Normalize column names
+        protocols_df.columns = protocols_df.columns.str.strip().str.lower()
+        tier_df.columns = tier_df.columns.str.strip().str.lower()
+
+        # Rename columns to ensure compatibility
+        if 'protocol' in protocols_df.columns:
+            logging.info("Renaming 'protocol' to 'protocol_name' in protocols_df")
+            protocols_df.rename(columns={'protocol': 'protocol_name'}, inplace=True)
+
+        if 'protocol' in tier_df.columns:
+            logging.info("Renaming 'protocol' to 'protocol_name' in tier_df")
+            tier_df.rename(columns={'protocol': 'protocol_name'}, inplace=True)
+
+        # Merge data
+        protocols_df = protocols_df.merge(tier_df, on='protocol_name', how='left')
+
+        protocols_df['tier'] = pd.to_numeric(protocols_df['tier'], errors='coerce').fillna(4)
+        protocols_df['strategy_rating'] = pd.to_numeric(protocols_df['strategy_rating'], errors='coerce').fillna(1)
+
         protocols_df['Strategy'] = protocols_df.apply(
-            lambda row: f"{row['Token1'].split('(')[0]} ({row['Token1'].split('(')[1][:-1]})" if row['Token1'] == row['Token2']
-            else f"{row['Token1'].split('(')[0]}/{row['Token2'].split('(')[0]} ({row['Token1'].split('(')[1][:-1]})",
-            axis=1
-        )
+            lambda row: f"{row['token1']}/{row['token2']} ({row['chain1']})"
+            if row['token1'] != row['token2'] else f"{row['token1']} ({row['chain1']})", axis=1)
 
-        tier_df = load_data(protocols_filepath)
-        protocols_df = protocols_df.merge(tier_df, on='Protocol', how='left')
-
-        # Allocation according to the Tiers of Protocol
-        # Rules are in allocation_rules.xlsx
-
+        # Allocation logic (unchanged)
         tier_allocations = {
-            1: 0.5 * total_allocation,
-            2: 0.3 * total_allocation,
-            3: 0.15 * total_allocation,
-            4: 0.05 * total_allocation
+            1: 0.5 * global_limit,
+            2: 0.3 * global_limit,
+            3: 0.15 * global_limit,
+            4: 0.05 * global_limit
         }
+        max_tier_limits = {1: 1.0, 2: 0.75, 3: 0.3, 4: 0.1}
+        max_pool_limits = {1: 0.8, 2: 0.3, 3: 0.15, 4: 0.05}
 
+        tier_allocations = redistribute_tiers(tier_allocations, protocols_df, global_limit, max_tier_limits)
         all_results = []
 
-        for tier, group in protocols_df.groupby('Tier'):
+        for tier, group in protocols_df.groupby('tier'):
+            if group.empty:
+                continue
 
-            n = len(group)
+            initial_weights = np.ones(len(group)) / len(group)
+            constraints, bounds = define_constraints(len(group))
 
-            initial_weights = np.ones(n) / n
-
-            constraints, bounds = define_constraints(n)
-
-            inverted_risk_scores = calculate_inverted_risk_scores(group['StrategyRating'].values)
-
+            inverted_risk_scores = 1 / group['strategy_rating'].values
             Sigma = create_risk_matrix(inverted_risk_scores)
-
             Sigma_norm = normalize_risk_matrix(Sigma)
 
-            optimal_weights = optimize_weights(Sigma_norm, initial_weights, tier_allocations[tier], constraints, bounds)
+            tier_allocation_limit = tier_allocations[tier]
+            optimal_weights = optimize_weights(
+                Sigma_norm, initial_weights, tier_allocation_limit, constraints, bounds
+            )
 
-            group['Allocation ($)'] = optimal_weights
-            group['Weight (%)'] = 100 * optimal_weights / total_allocation
-            
-            all_results.append(group[['Strategy', 'Protocol', 'ROI', 'Allocation ($)', 'Weight (%)']])
+            group['Allocation ($)'] = np.minimum(optimal_weights, max_pool_limits[tier] * global_limit)
+            group['Weight (%)'] = 100 * group['Allocation ($)'] / global_limit
+            all_results.append(group[['Strategy', 'protocol_name', 'roi', 'Allocation ($)', 'Weight (%)']])
 
-        final_summary = pd.concat(all_results).sort_values(by='Weight (%)', ascending=False)
-
-        final_summary['ROI'] = pd.to_numeric(final_summary['ROI'])
-
-        # Converting Weight (%) to numeric
-        final_summary['Weight (%)'] = pd.to_numeric(final_summary['Weight (%)'])
-
-        # Calculating the weighted average ROI
-        weighted_roi = (final_summary['ROI'] * final_summary['Weight (%)']).sum() / 100  # Calculate weighted average ROI
-        logging.info(f"Weighted Average ROI: {weighted_roi:.2f}")
-
-        # Saving the summary to CSV
-        save_allocation_summary_to_csv(final_summary, output_filepath)
+        if all_results:
+            final_summary = pd.concat(all_results).sort_values(by='Weight (%)', ascending=False)
+            save_allocation_to_db(final_summary)
+            final_summary.to_csv(output_filepath, index=False)
+            logging.info(f"Allocation summary saved to {output_filepath}")
+        else:
+            logging.warning("No results to save.")
 
     except Exception as e:
-        logging.error(f"An error occurred in the main function: {e}")
+        logging.error(f"An error occurred: {e}")
+
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
     main()

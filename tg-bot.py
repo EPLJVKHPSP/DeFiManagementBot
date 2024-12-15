@@ -19,6 +19,12 @@ from telegram.ext import filters as Filters
 
 from depeg_monitor import monitor_depeg
 
+from db_util import get_connection
+
+from psycopg2.extras import RealDictCursor
+
+import pandas as pd
+
 # IL-Calculation dialogue states
 CRYPTO1, CRYPTO1_BEFORE, CRYPTO1_AFTER, CRYPTO2, CRYPTO2_BEFORE, CRYPTO2_AFTER, CRYPTO2_FINAL_QTY, COMMISSION = range(8)
 
@@ -67,6 +73,12 @@ async def start(update: Update, context: CallbackContext) -> None:
 async def button(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
+
+    logging.info(f"Button clicked: {query.data}")
+
+    if query.data == 'change_pools':
+        logging.info("Calling change_pools function.")
+        await change_pools(update, context)
 
     if query.data == 'depeg_control':
         keyboard = [
@@ -214,32 +226,640 @@ async def handle_depeg_control(update: Update, context: CallbackContext, query_d
 # region functions for Allocation Calcualtor
 
 async def show_allocation(update: Update, context: CallbackContext) -> None:
-    """Send a message with the allocation summary."""
+    """Fetch allocation summary from the database and send it as a message."""
     try:
-        with open('allocation_summary.csv', newline='') as csvfile:
-            reader = csv.reader(csvfile)
-            headers = next(reader)
-            table_data = [f"[{index + 1}] {' | '.join(row)}" for index, row in enumerate(reader)]
-        formatted_table = " | ".join(headers) + "\n" + "\n" + "\n".join(table_data)
+        conn = get_connection()  # Fetch connection
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            # Update table name to `allocation_summary`
+            cursor.execute("SELECT * FROM ratings.allocation_summary ORDER BY weight DESC;")
+            allocations = cursor.fetchall()
+
+        # Format the allocation results into a readable table
+        headers = ["Strategy", "Protocol", "ROI", "Allocation ($)", "Weight (%)"]
+        rows = [
+            f"[{index + 1}] {row['strategy']} | {row['protocol']} | {row['roi']} | "
+            f"{row['allocation']} | {row['weight']}"
+            for index, row in enumerate(allocations)
+        ]
+        formatted_table = " | ".join(headers) + "\n" + "\n" + "\n".join(rows)
 
         if update.message:
             await update.message.reply_text(formatted_table)
         elif update.callback_query:
             await update.callback_query.message.reply_text(formatted_table)
+
     except Exception as e:
+        logging.error(f"Error fetching allocation summary: {str(e)}")
         if update.message:
-            await update.message.reply_text(f"An error occurred while reading the allocation summary: {str(e)}")
+            await update.message.reply_text(f"An error occurred: {str(e)}")
         elif update.callback_query:
-            await update.callback_query.message.reply_text(
-                f"An error occurred while reading the allocation summary: {str(e)}")
+            await update.callback_query.message.reply_text(f"An error occurred: {str(e)}")
+    finally:
+        conn.close()  # Always close the connection
 
 
 async def change_pools(update: Update, context: CallbackContext) -> None:
-    """Prompt the user to send a new CSV file to update the pools."""
-    if update.message:
-        await update.message.reply_text('Please upload a new CSV file to update the liquidity pools list.')
+    logging.info("change_pools function triggered.")
+
+    if update.callback_query:
+        await update.callback_query.message.reply_text("Please upload a CSV file with the pools data.")
+        return
+
+    if update.message and update.message.document:
+        document = update.message.document
+        logging.info(f"Received document: {document.file_name}")
+        # Process document upload logic here.
+    else:
+        logging.error("No document found.")
+    try:
+        # Check for a valid document
+        if not update.message or not update.message.document:
+            if update.callback_query:
+                await update.callback_query.answer("Please upload a valid CSV file.", show_alert=True)
+            elif update.message:
+                await update.message.reply_text("No document found. Please upload a valid CSV file.")
+            return
+        document = update.message.document
+
+        # Retrieve the file
+        try:
+            new_file = await context.bot.get_file(document.file_id)
+            if not new_file:
+                raise ValueError("Failed to retrieve the file.")
+        except Exception as e:
+            logging.error(f"Error retrieving file: {e}")
+            if update.message:
+                await update.message.reply_text(f"Error retrieving the file: {e}")
+            elif update.callback_query:
+                await update.callback_query.answer(f"Error retrieving the file: {e}", show_alert=True)
+            return
+
+        # Download the file
+        csv_path = os.path.join('data', document.file_name)
+        try:
+            await new_file.download_to_drive(custom_path=csv_path)
+        except Exception as e:
+            logging.error(f"Error downloading file: {e}")
+            if update.message:
+                await update.message.reply_text(f"Error downloading the file: {e}")
+            elif update.callback_query:
+                await update.callback_query.answer(f"Error downloading the file: {e}", show_alert=True)
+            return
+
+        # Load and validate the CSV file
+        try:
+            data = pd.read_csv(csv_path)
+            required_columns = ['id', 'token1', 'chain1', 'token2', 'chain2', 'protocol', 'pool_id', 'rating', 'roi', 'strategy_rating']
+            missing_columns = [col for col in required_columns if col not in data.columns]
+            if missing_columns:
+                raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
+        except Exception as e:
+            logging.error(f"Error reading CSV file: {e}")
+            if update.message:
+                await update.message.reply_text(f"Error processing the CSV file: {e}")
+            elif update.callback_query:
+                await update.callback_query.answer(f"Error processing the CSV file: {e}", show_alert=True)
+            return
+
+        # Update the database
+        try:
+            conn = get_connection()
+            with conn.cursor() as cursor:
+                cursor.execute("TRUNCATE TABLE ratings.pools;")  # Clear the table
+                for _, row in data.iterrows():
+                    cursor.execute(
+                        """
+                        INSERT INTO ratings.pools (id, token1, chain1, token2, chain2, protocol, pool_id, rating, roi, strategy_rating)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                        """,
+                        (row['id'], row['token1'], row['chain1'], row['token2'], row['chain2'],
+                         row['protocol'], row['pool_id'], row['rating'], row['roi'], row['strategy_rating'])
+                    )
+                conn.commit()
+            if update.message:
+                await update.message.reply_text("Pools updated successfully.")
+            elif update.callback_query:
+                await update.callback_query.answer("Pools updated successfully.", show_alert=True)
+        except Exception as e:
+            logging.error(f"Error updating database: {e}")
+            if update.message:
+                await update.message.reply_text(f"An error occurred while updating the database: {e}")
+            elif update.callback_query:
+                await update.callback_query.answer(f"An error occurred while updating the database: {e}", show_alert=True)
+        finally:
+            conn.close()
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+        if update.message:
+            await update.message.reply_text(f"An unexpected error occurred: {e}")
+        elif update.callback_query:
+            await update.callback_query.answer(f"An unexpected error occurred: {e}", show_alert=True)
+    try:
+        # Determine the document source
+        document = update.message.document if update.message else None
+
+        if not document or not document.file_id:
+            if update.message:
+                await update.message.reply_text("No document found. Please upload a valid CSV file.")
+            elif update.callback_query:
+                await update.callback_query.message.reply_text("No document found. Please upload a valid CSV file.")
+            return
+
+        # Validate the file type
+        file_extension = document.file_name.split('.')[-1].lower()
+        if file_extension != 'csv':
+            if update.message:
+                await update.message.reply_text("Invalid file type. Please upload a CSV file.")
+            elif update.callback_query:
+                await update.callback_query.message.reply_text("Invalid file type. Please upload a CSV file.")
+            return
+
+        # Retrieve the file
+        try:
+            new_file = await context.bot.get_file(document.file_id)
+            if not new_file:
+                if update.message:
+                    await update.message.reply_text("Failed to retrieve the file. Please try again.")
+                elif update.callback_query:
+                    await update.callback_query.message.reply_text("Failed to retrieve the file. Please try again.")
+                return
+        except Exception as e:
+            logging.error(f"Error retrieving file: {e}")
+            if update.message:
+                await update.message.reply_text(f"An error occurred while retrieving the file: {e}")
+            elif update.callback_query:
+                await update.callback_query.message.reply_text(f"An error occurred while retrieving the file: {e}")
+            return
+
+        # Download the file
+        csv_path = os.path.join('data', document.file_name)
+        try:
+            await new_file.download_to_drive(custom_path=csv_path)
+        except Exception as e:
+            logging.error(f"Error downloading file: {e}")
+            if update.message:
+                await update.message.reply_text(f"An error occurred while downloading the file: {e}")
+            elif update.callback_query:
+                await update.callback_query.message.reply_text(f"An error occurred while downloading the file: {e}")
+            return
+
+        # Load and validate the CSV file
+        try:
+            data = pd.read_csv(csv_path)
+            required_columns = ['token1', 'token2', 'protocol', 'pool_id', 'rating', 'roi', 'strategy_rating']
+            missing_columns = [col for col in required_columns if col not in data.columns]
+            if missing_columns:
+                raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
+        except Exception as e:
+            logging.error(f"Error reading CSV file: {e}")
+            if update.message:
+                await update.message.reply_text(f"Error processing the CSV file: {e}")
+            elif update.callback_query:
+                await update.callback_query.message.reply_text(f"Error processing the CSV file: {e}")
+            return
+
+        # Update the database
+        try:
+            update_pools_table(data)
+            if update.message:
+                await update.message.reply_text("Pools updated successfully.")
+            elif update.callback_query:
+                await update.callback_query.message.reply_text("Pools updated successfully.")
+        except Exception as e:
+            logging.error(f"Error updating database: {e}")
+            if update.message:
+                await update.message.reply_text(f"An error occurred while updating pools: {e}")
+            elif update.callback_query:
+                await update.callback_query.message.reply_text(f"An error occurred while updating pools: {e}")
+            return
+    except Exception as e:
+        logging.error
+    try:
+        # Validate the document
+        if not update.message or not update.message.document:
+            await update.message.reply_text("No document found. Please upload a valid CSV file.")
+            return
+
+        document = update.message.document
+        if not document.file_id:
+            await update.message.reply_text("Invalid file uploaded. Please upload a valid CSV file.")
+            return
+
+        # Validate the file type
+        file_extension = document.file_name.split('.')[-1].lower()
+        if file_extension != 'csv':
+            await update.message.reply_text("Invalid file type. Please upload a CSV file.")
+            return
+
+        # Retrieve the file
+        try:
+            new_file = await context.bot.get_file(document.file_id)
+            if not new_file:
+                await update.message.reply_text("Failed to retrieve the file. Please try again.")
+                return
+        except Exception as e:
+            logging.error(f"Error retrieving file: {e}")
+            await update.message.reply_text(f"An error occurred while retrieving the file: {e}")
+            return
+
+        # Download the file
+        csv_path = os.path.join('data', document.file_name)
+        try:
+            await new_file.download_to_drive(custom_path=csv_path)
+        except Exception as e:
+            logging.error(f"Error downloading file: {e}")
+            await update.message.reply_text(f"An error occurred while downloading the file: {e}")
+            return
+
+        # Load and validate the CSV file
+        try:
+            data = pd.read_csv(csv_path)
+            required_columns = ['token1', 'token2', 'protocol', 'pool_id', 'rating', 'roi', 'strategy_rating']
+            missing_columns = [col for col in required_columns if col not in data.columns]
+            if missing_columns:
+                raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
+        except Exception as e:
+            logging.error(f"Error reading CSV file: {e}")
+            await update.message.reply_text(f"Error processing the CSV file: {e}")
+            return
+
+        # Update the database
+        try:
+            update_pools_table(data)
+            await update.message.reply_text("Pools updated successfully.")
+        except Exception as e:
+            logging.error(f"Error updating database: {e}")
+            await update.message.reply_text(f"An error occurred while updating pools: {e}")
+            return
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+        await update.message.reply_text(f"An unexpected error occurred: {e}")
+    try:
+        # Determine if this is a message or a callback query
+        if update.message:
+            document = update.message.document
+        elif update.callback_query:
+            document = update.callback_query.message.document
+        else:
+            if update.message:
+                await update.message.reply_text("No document found. Please upload a valid CSV file.")
+            elif update.callback_query:
+                await update.callback_query.message.reply_text("No document found. Please upload a valid CSV file.")
+            return
+
+        if not document or not document.file_id:
+            if update.message:
+                await update.message.reply_text("Invalid file uploaded. Please upload a valid CSV file.")
+            elif update.callback_query:
+                await update.callback_query.message.reply_text("Invalid file uploaded. Please upload a valid CSV file.")
+            return
+
+        # Validate the file type
+        file_extension = document.file_name.split('.')[-1].lower()
+        if file_extension != 'csv':
+            if update.message:
+                await update.message.reply_text("Invalid file type. Please upload a CSV file.")
+            elif update.callback_query:
+                await update.callback_query.message.reply_text("Invalid file type. Please upload a CSV file.")
+            return
+
+        # Retrieve the file
+        try:
+            new_file = await context.bot.get_file(document.file_id)
+            if not new_file:
+                if update.message:
+                    await update.message.reply_text("Failed to retrieve the file. Please try again.")
+                elif update.callback_query:
+                    await update.callback_query.message.reply_text("Failed to retrieve the file. Please try again.")
+                return
+        except Exception as e:
+            logging.error(f"Error retrieving file: {e}")
+            if update.message:
+                await update.message.reply_text(f"An error occurred while retrieving the file: {e}")
+            elif update.callback_query:
+                await update.callback_query.message.reply_text(f"An error occurred while retrieving the file: {e}")
+            return
+
+        # Download the file
+        csv_path = os.path.join('data', document.file_name)
+        try:
+            await new_file.download_to_drive(custom_path=csv_path)
+        except Exception as e:
+            logging.error(f"Error downloading file: {e}")
+            if update.message:
+                await update.message.reply_text(f"An error occurred while downloading the file: {e}")
+            elif update.callback_query:
+                await update.callback_query.message.reply_text(f"An error occurred while downloading the file: {e}")
+            return
+
+        # Load and validate the CSV file
+        try:
+            data = pd.read_csv(csv_path)
+            required_columns = ['token1', 'token2', 'protocol', 'pool_id', 'rating', 'roi', 'strategy_rating']
+            missing_columns = [col for col in required_columns if col not in data.columns]
+            if missing_columns:
+                raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
+        except Exception as e:
+            logging.error(f"Error reading CSV file: {e}")
+            if update.message:
+                await update.message.reply_text(f"Error processing the CSV file: {e}")
+            elif update.callback_query:
+                await update.callback_query.message.reply_text(f"Error processing the CSV file: {e}")
+            return
+
+        # Update the database
+        try:
+            update_pools_table(data)
+            if update.message:
+                await update.message.reply_text("Pools updated successfully.")
+            elif update.callback_query:
+                await update.callback_query.message.reply_text("Pools updated successfully.")
+        except Exception as e:
+            logging.error(f"Error updating database: {e}")
+            if update.message:
+                await update.message.reply_text(f"An error occurred while updating pools: {e}")
+            elif update.callback_query:
+                await update.callback_query.message.reply_text(f"An error occurred while updating pools: {e}")
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+        if update.message:
+            await update.message.reply_text(f"An unexpected error occurred: {e}")
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(f"An unexpected error occurred: {e}")
+    try:
+        # Validate the document
+        if not update.message or not update.message.document:
+            await update.message.reply_text("No document found. Please upload a valid CSV file.")
+            return
+
+        document = update.message.document
+        if not document.file_id:
+            await update.message.reply_text("Invalid file uploaded. Please upload a valid CSV file.")
+            return
+
+        # Validate the file type
+        file_extension = document.file_name.split('.')[-1].lower()
+        if file_extension != 'csv':
+            await update.message.reply_text("Invalid file type. Please upload a CSV file.")
+            return
+
+        # Retrieve the file
+        try:
+            new_file = await context.bot.get_file(document.file_id)
+            if not new_file:
+                await update.message.reply_text("Failed to retrieve the file. Please try again.")
+                return
+        except Exception as e:
+            logging.error(f"Error retrieving file: {e}")
+            await update.message.reply_text(f"An error occurred while retrieving the file: {e}")
+            return
+
+        # Download the file
+        csv_path = os.path.join('data', document.file_name)
+        try:
+            await new_file.download_to_drive(custom_path=csv_path)
+        except Exception as e:
+            logging.error(f"Error downloading file: {e}")
+            await update.message.reply_text(f"An error occurred while downloading the file: {e}")
+            return
+
+        # Load and validate the CSV file
+        try:
+            data = pd.read_csv(csv_path)
+            required_columns = ['token1', 'token2', 'protocol', 'pool_id', 'rating', 'roi', 'strategy_rating']
+            missing_columns = [col for col in required_columns if col not in data.columns]
+            if missing_columns:
+                raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
+        except Exception as e:
+            logging.error(f"Error reading CSV file: {e}")
+            await update.message.reply_text(f"Error processing the CSV file: {e}")
+            return
+
+        # Update the database
+        try:
+            update_pools_table(data)
+            await update.message.reply_text("Pools updated successfully.")
+        except Exception as e:
+            logging.error(f"Error updating database: {e}")
+            await update.message.reply_text(f"An error occurred while updating pools: {e}")
+            return
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+        await update.message.reply_text(f"An unexpected error occurred: {e}")
+    """Update the pools database with a new CSV file."""
+    try:
+        # Check if the update contains a valid document
+        if not update.message or not update.message.document:
+            if update.callback_query:
+                await update.callback_query.message.reply_text("Please upload a valid CSV file to update the pools.")
+            else:
+                await update.message.reply_text("No document found. Please upload a valid CSV file.")
+            return
+
+        # Extract the document from the message
+        document = update.message.document
+        if not document.file_id:
+            await update.message.reply_text("Invalid file. Please upload a valid CSV file.")
+            return
+
+        # Download the file
+        new_file = await context.bot.get_file(document.file_id)
+        csv_path = os.path.join('data', document.file_name)
+        await new_file.download_to_drive(custom_path=csv_path)
+
+        # Load the CSV into a DataFrame
+        logging.info(f"Processing CSV file: {csv_path}")
+        data = pd.read_csv(csv_path)
+
+        # Check for missing columns
+        required_columns = ['token1', 'token2', 'protocol', 'pool_id', 'rating', 'roi', 'strategy_rating']
+        missing_columns = [col for col in required_columns if col not in data.columns]
+        if missing_columns:
+            raise ValueError(f"Missing required columns in the CSV: {', '.join(missing_columns)}")
+
+        # Update the database
+        update_pools_table(data)
+
+        # Respond to the user
+        await update.message.reply_text("Pools updated successfully.")
+    except Exception as e:
+        logging.error(f"Error while processing the file: {e}")
+        if update.message:
+            await update.message.reply_text(f"An error occurred while processing the file: {e}")
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(f"An error occurred while processing the file: {e}")
+    """Update the pools database with a new CSV file."""
+    try:
+        # Ensure the update is from a message and contains a document
+        if not update.message or not update.message.document:
+            if update.callback_query:
+                await update.callback_query.message.reply_text(
+                    "Please upload a CSV file to update the pools."
+                )
+            else:
+                await update.message.reply_text(
+                    "No document found. Please upload a CSV file."
+                )
+            return
+
+        # Retrieve the document from the message
+        document = update.message.document
+        logging.info(f"Received file: {document.file_name}")
+
+        # Download the file
+        new_file = await context.bot.get_file(document.file_id)
+        csv_path = os.path.join('data', document.file_name)
+        await new_file.download_to_drive(custom_path=csv_path)
+
+        # Load the CSV into a DataFrame
+        logging.info(f"Processing CSV file: {csv_path}")
+        data = pd.read_csv(csv_path)
+
+        # Validate required columns in the CSV
+        required_columns = ['token1', 'token2', 'protocol', 'pool_id', 'rating', 'roi', 'strategy_rating']
+        missing_columns = [col for col in required_columns if col not in data.columns]
+        if missing_columns:
+            raise ValueError(f"Missing required columns in the CSV: {', '.join(missing_columns)}")
+
+        # Update the database
+        update_pools_table(data)
+
+        # Respond to the user
+        await update.message.reply_text("Pools updated successfully.")
+    except Exception as e:
+        logging.error(f"Error while processing the file: {e}")
+        if update.message:
+            await update.message.reply_text(f"An error occurred while processing the file: {e}")
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(f"An error occurred while processing the file: {e}")
+    """Update the pools database with a new CSV file."""
+    # Check if the update is from a message and contains a document
+    if update.message and update.message.document:
+        document = update.message.document
+        try:
+            # Retrieve the uploaded file
+            new_file = await context.bot.get_file(document.file_id)
+            
+            # Save the uploaded file locally
+            csv_path = os.path.join('data', 'pools.csv')
+            await new_file.download_to_drive(custom_path=csv_path)
+
+            # Load the CSV into a DataFrame
+            data = pd.read_csv(csv_path)
+            logging.info(f"CSV file loaded successfully with {len(data)} rows.")
+
+            # Validate required columns
+            required_columns = ['token1', 'token2', 'protocol', 'pool_id', 'rating', 'roi', 'strategy_rating']
+            missing_columns = [col for col in required_columns if col not in data.columns]
+            if missing_columns:
+                raise ValueError(f"Missing required columns in CSV: {', '.join(missing_columns)}")
+
+            # Update the database
+            update_pools_table(data)
+
+            # Respond to the user
+            await update.message.reply_text('Pools updated successfully.')
+        except Exception as e:
+            logging.error(f"Error processing the file: {e}")
+            await update.message.reply_text(f"An error occurred while processing the file: {e}")
+    else:
+        # Handle cases where no document is uploaded
+        if update.callback_query:
+            await update.callback_query.message.reply_text("Please upload a CSV file by sending it to this chat.")
+        else:
+            logging.error("Invalid update: No document found in message.")
+            await update.message.reply_text("No document found. Please upload a CSV file.")
+    """Update the pools database with a new CSV file."""
+    # Check if the update is from a message or a callback query
+    if update.message and update.message.document:
+        document = update.message.document
+        try:
+            new_file = await context.bot.get_file(document.file_id)
+            
+            # Save the uploaded CSV to a local file
+            csv_path = os.path.join('data', 'pools.csv')
+            await new_file.download_to_drive(custom_path=csv_path)
+
+            # Load the CSV into a Pandas DataFrame
+            data = pd.read_csv(csv_path)
+            logging.info(f"CSV loaded successfully with {len(data)} rows.")
+
+            # Update the pools table with the data
+            update_pools_table(data)
+
+            await update.message.reply_text('Pools updated successfully.')
+        except Exception as e:
+            logging.error(f"Error updating pools: {e}")
+            await update.message.reply_text(f"An error occurred while processing the file: {e}")
     elif update.callback_query:
-        await update.callback_query.message.reply_text('Please upload a new CSV file to update the liquidity pools list.')
+        await update.callback_query.message.reply_text(
+            "Please upload a CSV file by sending it to this chat, not clicking the button."
+        )
+    else:
+        logging.error("Invalid update: No document found in message or callback query.")
+        await update.message.reply_text("No document found. Please upload a CSV file.")
+    """Update the pools database with a new CSV file."""
+    document = update.message.document  # Ensure this is called from a Message update
+    new_file = await context.bot.get_file(document.file_id)
+    try:
+        # Save the uploaded CSV to a local file
+        csv_path = os.path.join('data', 'pools.csv')
+        await new_file.download_to_drive(custom_path=csv_path)
+
+        # Load the CSV into a Pandas DataFrame
+        data = pd.read_csv(csv_path)
+        logging.info(f"CSV loaded successfully with {len(data)} rows.")
+
+        # Update the pools table with the data
+        update_pools_table(data)
+
+        await update.message.reply_text('Pools updated successfully.')
+    except Exception as e:
+        logging.error(f"Error updating pools: {e}")
+        await update.message.reply_text(f"An error occurred while processing the file: {e}")
+    """Prompt user to upload a CSV file to update the pools."""
+    try:
+        if update.callback_query:
+            await update.callback_query.message.reply_text("Please upload a CSV file to update the pools.")
+        elif update.message:
+            await update.message.reply_text("Please upload a CSV file to update the pools.")
+    except Exception as e:
+        logging.error(f"Error in change_pools: {str(e)}")
+        if update.callback_query:
+            await update.callback_query.message.reply_text(f"An error occurred: {str(e)}")
+        elif update.message:
+            await update.message.reply_text(f"An error occurred: {str(e)}")
+    """Update the pools database with a new CSV file."""
+    document = update.message.document
+    new_file = await context.bot.get_file(document.file_id)
+    try:
+        csv_path = os.path.join('data', 'pools.csv')
+        await new_file.download_to_drive(custom_path=csv_path)
+
+        # Read the CSV and update the database
+        data = pd.read_csv(csv_path)
+        conn = get_connection()  # Fetch connection
+        with conn.cursor() as cursor:
+            # Clear existing pools
+            cursor.execute("TRUNCATE TABLE ratings.pools;")
+
+            # Insert new pools
+            for _, row in data.iterrows():
+                cursor.execute(
+                    """
+                    INSERT INTO ratings.pools (token1, token2, protocol, pool_id, rating, roi, strategy_rating)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s);
+                    """,
+                    (row['Token1'], row['Token2'], row['Protocol'], row['PoolID'], row['Rating'], row['ROI'], row['StrategyRating']),
+                )
+            conn.commit()
+
+        await update.message.reply_text('Pools updated successfully.')
+    except Exception as e:
+        logging.error(f"Error updating pools: {str(e)}")
+        await update.message.reply_text(f"An error occurred while updating pools: {str(e)}")
+    finally:
+        conn.close()  # Always close the connection
 
 
 async def set_allocation(update: Update, context: CallbackContext) -> None:
@@ -293,11 +913,6 @@ async def run_scripts(update: Update, context: CallbackContext) -> None:
         await update.callback_query.message.reply_text('Running scripts... Please wait.')
 
     try:
-        # Adding log to verify if the file exists and its last modified time
-        pools_path = os.path.join('data', 'pools.csv')
-        if os.path.exists(pools_path):
-            logging.info(f"{pools_path} last modified at: {os.path.getmtime(pools_path)}")
-
         result = subprocess.run(["python3", "run.py"], capture_output=True, text=True)
         response_message = result.stdout if result.stdout else result.stderr
 
@@ -306,8 +921,11 @@ async def run_scripts(update: Update, context: CallbackContext) -> None:
         elif update.callback_query:
             await update.callback_query.message.reply_text(f"Script executed:\n{response_message}")
 
+        # Show updated allocation results
         await show_allocation(update, context)
+
     except Exception as e:
+        logging.error(f"Error running scripts: {str(e)}")
         if update.message:
             await update.message.reply_text(f"An error occurred: {str(e)}")
         elif update.callback_query:
@@ -317,17 +935,65 @@ async def run_scripts(update: Update, context: CallbackContext) -> None:
 # documents handling
 
 async def handle_document(update: Update, context: CallbackContext) -> None:
-    """Handle document uploads based on file extension."""
+    """Handle document uploads and process CSV files to update the pools table."""
     document = update.message.document
     file_extension = document.file_name.split('.')[-1].lower()
 
-    if file_extension == 'csv':
-        await process_csv_document(update, context, document)
-    elif file_extension == 'json':
-        await process_json_document(update, context, document)
-    else:
-        await update.message.reply_text('Unsupported file type. Please upload a CSV or JSON file.')
-        pass
+    if file_extension != 'csv':
+        await update.message.reply_text("Invalid file type. Please upload a CSV file.")
+        return
+
+    try:
+        new_file = await context.bot.get_file(document.file_id)
+        file_path = os.path.join('data', document.file_name)
+        await new_file.download_to_drive(custom_path=file_path)
+
+        # Read the CSV file
+        pools_data = pd.read_csv(file_path)
+
+        # Update the database
+        await update_pools_table(pools_data)
+
+        await update.message.reply_text("Pools table updated successfully.")
+
+    except Exception as e:
+        logging.error(f"Error processing document: {str(e)}")
+        await update.message.reply_text(f"An error occurred while processing the file: {str(e)}")
+
+def update_pools_table(data):
+    """Update the ratings.pools table with the given data."""
+    try:
+        conn = get_connection()  # Ensure you have a working database connection
+        with conn.cursor() as cursor:
+            # Clear existing data in the pools table
+            cursor.execute("TRUNCATE TABLE ratings.pools;")
+            
+            # Insert new data into the pools table
+            for _, row in data.iterrows():
+                cursor.execute(
+                    """
+                    INSERT INTO ratings.pools (token1, chain1, token2, chain2, protocol, pool_id, rating, roi, strategy_rating)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+                    """,
+                    (
+                        row['token1'],  # Replace with your actual CSV column names
+                        row['chain1'],
+                        row['token2'],
+                        row['chain2'],
+                        row['protocol'],
+                        row['pool_id'],
+                        row['rating'],
+                        row['roi'],
+                        row['strategy_rating']
+                    )
+                )
+            conn.commit()
+            logging.info("Pools table updated successfully.")
+    except Exception as e:
+        logging.error(f"Error updating pools table: {e}")
+        raise
+    finally:
+        conn.close()
 
 
 async def process_csv_document(update: Update, context: CallbackContext, document):
