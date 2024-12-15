@@ -1,0 +1,11 @@
+id, Page,Ticker,Name,Quantity,Amount,Price,In Stock,Sold,Sold Amount,Sale Profit,Remaining,Current Price,Current Value,Current Profit,Condition
+,Solanium,CMFI,Compendium Finance,1126.0,91.0,0.080817,1126.0,0,0,-91.0,1126.0,,0.0,-91.0,Squads Vault
+,Solanium,DELFI,DeltaFi,369.0,370.0,1.002710,369.0,0,0,-370.0,369.0,,0.0,-370.0,Squads Vault
+,Solanium,NESTA,Nest Arcade,16087.0,168.0,0.010443,16087.0,0,0,-168.0,16087.0,,0.0,-168.0,Squads Vault
+,Solanium,SVT,Solvent,237.0,72.0,0.303797,237.0,0,0,-72.0,237.0,,0.0,-72.0,Squads Vault
+,Solanium,DRAW,Dragon War,3037.97,36.46,0.012001,607.5,0,0,-36.46,3037.97,,0.0,-36.46,Phantom Wallet Old
+,Solanium,HBB,Hubble Protocol,328.0,330.0,1.006098,0.0,328.0,27.0,-303.0,0.0,,0.0,-303.0,SOLD OUT
+,Solanium,DGE,DarleyGo Essence,2500.0,200.0,0.08,0.0,1000.0,140.0,-60.0,1500.0,,0.0,-60.0,Squads Vault
+,Solanium,PRGC,ProtoReality Games,2566.6,150.0,0.06,433.0,0,0,-150.0,2566.6,,0.0,-150.0,Squads Vault
+,Solanium,YOUR,YOUR,11877.0,119.0,0.01,11877.0,0,0,-119.0,11877.0,,0.0,-119.0,Phantom Wallet Old
+,Solanium,FROST,Frost,146.5,44.0,0.3,0.0,0,0,-44.0,0.0,,0.0,-44.0,Phantom Wallet Old
