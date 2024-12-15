@@ -880,7 +880,7 @@ async def set_allocation(update: Update, context: CallbackContext) -> None:
         # Modify the line containing the allocation variable
         updated = False
         for i, line in enumerate(lines):
-            if 'allocation =' in line:
+            if 'global_limit =' in line:
                 lines[i] = f'allocation = {new_allocation}\n'
                 updated = True
                 logging.info(f"Allocation updated to {new_allocation}")
