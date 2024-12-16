@@ -141,8 +141,8 @@ def main():
         protocols_df['strategy_rating'] = pd.to_numeric(protocols_df['strategy_rating'], errors='coerce').fillna(1)
 
         protocols_df['Strategy'] = protocols_df.apply(
-            lambda row: f"{row['token1']}/{row['token2']} ({row['chain1']})"
-            if row['token1'] != row['token2'] else f"{row['token1']} ({row['chain1']})", axis=1)
+            lambda row: f"{row['token1']}/{row['token2']} ({row['chain']})"
+            if row['token1'] != row['token2'] else f"{row['token1']} ({row['chain']})", axis=1)
 
         # Allocation logic (unchanged)
         tier_allocations = {

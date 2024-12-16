@@ -1,5 +1,6 @@
 const pool = require('./db');
 
+// Utility function to execute queries
 async function executeQuery(query, params = []) {
     try {
         const boundQuery = pool.query.bind(pool);
@@ -10,9 +11,10 @@ async function executeQuery(query, params = []) {
     }
 }
 
+// Load token ratings considering both token and chain
 async function loadTokenRatings() {
     try {
-        const query = 'SELECT token, tier FROM ratings.tokens;';
+        const query = 'SELECT token, chain, tier FROM ratings.tokens;';
         console.log('Calling pool.query for token ratings...');
         const tokens = await executeQuery(query);
 
@@ -20,11 +22,12 @@ async function loadTokenRatings() {
 
         const tokenRatings = {};
         tokens.rows.forEach(token => {
-            if (!token.token) {
+            if (!token.token || !token.chain) {
                 console.warn('Invalid token entry in ratings.tokens:', token);
                 return;
             }
-            tokenRatings[token.token.trim().toUpperCase()] = parseFloat(token.tier);
+            const key = `${token.token.trim().toUpperCase()}-${token.chain.trim().toUpperCase()}`;
+            tokenRatings[key] = parseFloat(token.tier);
         });
 
         console.log('Token Ratings Dictionary:', tokenRatings);
@@ -35,26 +38,30 @@ async function loadTokenRatings() {
     }
 }
 
+// Calculate and update strategy ratings for pools
 async function calculateStrategyRatings() {
     try {
         const tokenRatings = await loadTokenRatings();
         console.log('Token Ratings:', tokenRatings); // Log the token ratings dictionary
 
-        const query = 'SELECT * FROM ratings.pools;';
+        const query = 'SELECT id, token1, token2, chain, protocol, roi, rating FROM ratings.pools;';
         console.log('Calling pool.query for pool data...');
         const result = await executeQuery(query);
         const pools = result.rows;
 
         for (const pool of pools) {
-            const token1Rating = tokenRatings[pool.token1.trim().toUpperCase()] || 0;
-            const token2Rating = tokenRatings[pool.token2.trim().toUpperCase()] || 0;
+            const token1Key = `${pool.token1.trim().toUpperCase()}-${pool.chain.trim().toUpperCase()}`;
+            const token2Key = `${pool.token2.trim().toUpperCase()}-${pool.chain.trim().toUpperCase()}`;
 
-            console.log(`PoolID: ${pool.pool_id}, Token1: ${pool.token1}, Token2: ${pool.token2}`);
+            const token1Rating = tokenRatings[token1Key] || 0;
+            const token2Rating = tokenRatings[token2Key] || 0;
+
+            console.log(`PoolID: ${pool.id}, Token1: ${pool.token1}, Token2: ${pool.token2}, Chain: ${pool.chain}`);
             console.log(`Token1Rating: ${token1Rating}, Token2Rating: ${token2Rating}`);
 
             if (token1Rating === 0 || token2Rating === 0) {
                 console.warn(
-                    `Skipping PoolID ${pool.pool_id}: Missing or zero rating for Token1 (${pool.token1}) or Token2 (${pool.token2})`
+                    `Skipping PoolID ${pool.id}: Missing or zero rating for Token1 (${pool.token1}, Chain: ${pool.chain}) or Token2 (${pool.token2}, Chain: ${pool.chain})`
                 );
                 continue;
             }
@@ -67,7 +74,7 @@ async function calculateStrategyRatings() {
                 strategyRating = rating / averageTokenRating / 10000000;
             } else {
                 console.warn(
-                    `Skipping PoolID ${pool.pool_id}: Invalid averageTokenRating (${averageTokenRating}) or rating (${rating})`
+                    `Skipping PoolID ${pool.id}: Invalid averageTokenRating (${averageTokenRating}) or rating (${rating})`
                 );
                 continue;
             }
@@ -75,10 +82,10 @@ async function calculateStrategyRatings() {
             const updateQuery = `
                 UPDATE ratings.pools
                 SET strategy_rating = $1
-                WHERE pool_id = $2;
+                WHERE id = $2;
             `;
-            console.log(`Updating strategy rating for PoolID ${pool.pool_id} with value: ${strategyRating}`);
-            await executeQuery(updateQuery, [strategyRating, pool.pool_id]);
+            console.log(`Updating strategy rating for PoolID ${pool.id} with value: ${strategyRating}`);
+            await executeQuery(updateQuery, [strategyRating, pool.id]);
         }
 
         console.log('Strategy Ratings updated successfully in the database.');
