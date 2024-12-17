@@ -989,27 +989,19 @@ async def run_scripts(update: Update, context: CallbackContext) -> None:
 # documents handling
 
 async def handle_document(update: Update, context: CallbackContext) -> None:
-    """Handle document uploads and process CSV files to update the pools table."""
+    """Handle document uploads and route them based on file type."""
     document = update.message.document
     file_extension = document.file_name.split('.')[-1].lower()
 
-    if file_extension != 'csv':
-        await update.message.reply_text("Invalid file type. Please upload a CSV file.")
-        return
-
     try:
-        new_file = await context.bot.get_file(document.file_id)
-        file_path = os.path.join('data', document.file_name)
-        await new_file.download_to_drive(custom_path=file_path)
-
-        # Read the CSV file
-        pools_data = pd.read_csv(file_path)
-
-        # Update the database
-        await update_pools_table(pools_data)
-
-        await update.message.reply_text("Pools table updated successfully.")
-
+        if file_extension == 'csv':
+            # Handle CSV files
+            await process_csv_document(update, context, document)
+        elif file_extension == 'json':
+            # Handle JSON files
+            await process_json_document(update, context)
+        else:
+            await update.message.reply_text("Invalid file type. Please upload a JSON or CSV file.")
     except Exception as e:
         logging.error(f"Error processing document: {str(e)}")
         await update.message.reply_text(f"An error occurred while processing the file: {str(e)}")
@@ -1061,18 +1053,108 @@ async def process_csv_document(update: Update, context: CallbackContext, documen
         await update.message.reply_text(f"An error occurred: {str(e)}")
 
 
-async def process_json_document(update: Update, context: CallbackContext, document):
-    """Process JSON documents."""
-    new_file = await context.bot.get_file(document.file_id)
-    new_file_path = os.path.join(os.getcwd(), 'depeg_tracking.json')
-    try:
-        # Correct method for downloading files in version 20+
-        await new_file.download_to_drive(custom_path=new_file_path)
+import os
+import json
+import logging
+from db_util import get_connection
 
-        # After downloading, reload the pairs and reset the price histories
-        pairs = load_pairs()  # noqa: F405
-        logging.info(f"New pairs loaded from updated JSON: {pairs}")
-        await update.message.reply_text('JSON file updated successfully, and pairs have been reloaded.')
+import os
+import json
+import logging
+from db_util import get_connection
+
+async def process_json_document(update: Update, context: CallbackContext):
+    """
+    Process uploaded JSON documents to update 'ratings.depeg' table.
+    - Clears the table and inserts new tokens with generated UUIDs.
+    """
+    try:
+        # Step 1: Download the uploaded JSON file
+        document = update.message.document
+        new_file = await context.bot.get_file(document.file_id)
+        file_path = os.path.join(os.getcwd(), 'temp_depeg.json')  # Temporary file to process JSON
+
+        await new_file.download_to_drive(custom_path=file_path)
+        logging.info("JSON file downloaded for processing.")
+
+        # Step 2: Load and validate the content of the JSON file
+        with open(file_path, 'r') as file:
+            data = json.load(file)
+
+        if 'pairs' not in data or not isinstance(data['pairs'], list):
+            raise ValueError("Invalid JSON format. The file must contain a 'pairs' key with a list of tokens.")
+
+        tokens = data['pairs']
+        logging.info(f"Tokens extracted: {tokens}")
+
+        # Step 3: Update the database
+        conn = get_connection()
+        with conn.cursor() as cursor:
+            # Clear the existing table
+            cursor.execute("TRUNCATE TABLE ratings.depeg;")
+            logging.info("Existing table data cleared.")
+
+            # Insert new tokens with generated UUIDs
+            insert_query = "INSERT INTO ratings.depeg (id, token) VALUES (gen_random_uuid(), %s);"
+            for token in tokens:
+                cursor.execute(insert_query, (token,))
+            conn.commit()
+            logging.info(f"Inserted {len(tokens)} tokens into ratings.depeg.")
+
+        # Step 4: Respond to the user
+        await update.message.reply_text(
+            f"Database updated successfully with {len(tokens)} tokens!"
+        )
+
+        # Step 5: Clean up the temporary file
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+    except Exception as e:
+        logging.error(f"Error processing JSON document: {str(e)}")
+        await update.message.reply_text(f"An error occurred while processing the JSON file: {str(e)}")
+    """
+    Process uploaded JSON documents:
+    - Directly update the 'ratings.depeg' table in the database.
+    """
+    try:
+        # Step 1: Download the JSON file
+        new_file = await context.bot.get_file(document.file_id)
+        file_path = os.path.join(os.getcwd(), 'temp_depeg.json')  # Temporary file to process JSON
+
+        await new_file.download_to_drive(custom_path=file_path)
+        logging.info("JSON file downloaded for processing.")
+
+        # Step 2: Load the content of the JSON file
+        with open(file_path, 'r') as file:
+            data = json.load(file)
+
+        # Validate JSON structure
+        if 'pairs' not in data or not isinstance(data['pairs'], list):
+            raise ValueError("Invalid JSON format. The file must contain a 'pairs' key with a list of tokens.")
+
+        tokens = data['pairs']
+
+        # Step 3: Update the database
+        conn = get_connection()
+        with conn.cursor() as cursor:
+            cursor.execute("TRUNCATE TABLE ratings.depeg;")  # Clear existing data
+            for token in tokens:
+                cursor.execute("INSERT INTO ratings.depeg (id, token) VALUES (gen_random_uuid(), %s);", (token,))
+        conn.commit()
+        conn.close()
+
+        logging.info("Database updated successfully with new tokens.")
+
+        # Step 4: Respond to the user
+        await update.message.reply_text(
+            f"Database updated successfully with {len(tokens)} tokens!"
+        )
+
+        # Clean up the temporary file
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
     except Exception as e:
         logging.error(f"Error processing JSON document: {str(e)}")
         await update.message.reply_text(f"An error occurred while processing the JSON file: {str(e)}")
