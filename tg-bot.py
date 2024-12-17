@@ -259,6 +259,60 @@ async def show_allocation(update: Update, context: CallbackContext) -> None:
 
 
 async def change_pools(update: Update, context: CallbackContext) -> None:
+    if update.message.document:
+        document = update.message.document
+        file_extension = document.file_name.split('.')[-1].lower()
+        
+        if file_extension != 'csv':
+            await update.message.reply_text("Invalid file type. Please upload a CSV file.")
+            return
+
+        new_file = await context.bot.get_file(document.file_id)
+
+        if not new_file:
+            logging.warning("Received NoneType for file retrieval. Ignoring and continuing.")
+        return
+    
+        csv_path = os.path.join('data', document.file_name)
+        await new_file.download_to_drive(custom_path=csv_path)
+
+        try:
+            # Load CSV file
+            data = pd.read_csv(csv_path)
+
+            # Check if 'id' column exists, as it is mandatory
+            if 'id' not in data.columns:
+                await update.message.reply_text("Error: 'id' column is required in the CSV file.")
+                return
+
+            # Only include columns present in both the database schema and the CSV
+            valid_columns = ['id', 'token1', 'token2', 'protocol', 'rating', 'roi', 'strategy_rating', 'chain']
+            available_columns = [col for col in valid_columns if col in data.columns]
+
+            # Prepare the SQL query dynamically
+            col_str = ", ".join(available_columns)
+            placeholders = ", ".join(["%s"] * len(available_columns))
+            query = f"""
+                TRUNCATE TABLE ratings.pools;
+                INSERT INTO ratings.pools ({col_str})
+                VALUES ({placeholders});
+            """
+
+            # Insert data into the database
+            conn = get_connection()
+            cursor = conn.cursor()
+
+            for row in data[available_columns].itertuples(index=False, name=None):
+                cursor.execute(query, row)
+
+            conn.commit()
+            conn.close()
+
+            await update.message.reply_text("Pools updated successfully.")
+        
+        except Exception as e:
+            logging.error(f"Error processing CSV file: {e}")
+            await update.message.reply_text(f"An error occurred while processing the file: {e}")
     logging.info("change_pools function triggered.")
 
     if update.callback_query:
@@ -961,32 +1015,30 @@ async def handle_document(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text(f"An error occurred while processing the file: {str(e)}")
 
 def update_pools_table(data):
-    """Update the ratings.pools table with the given data."""
+    """Dynamically update the ratings.pools table with available columns."""
     try:
-        conn = get_connection()  # Ensure you have a working database connection
+        conn = get_connection()
         with conn.cursor() as cursor:
-            # Clear existing data in the pools table
+            # Clear the existing table
             cursor.execute("TRUNCATE TABLE ratings.pools;")
+
+            # Valid table columns
+            valid_columns = ['id', 'token1', 'token2', 'protocol', 'rating', 'roi', 'strategy_rating', 'chain']
             
-            # Insert new data into the pools table
-            for _, row in data.iterrows():
-                cursor.execute(
-                    """
-                    INSERT INTO ratings.pools (token1, chain1, token2, chain2, protocol, pool_id, rating, roi, strategy_rating)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
-                    """,
-                    (
-                        row['token1'],  # Replace with your actual CSV column names
-                        row['chain1'],
-                        row['token2'],
-                        row['chain2'],
-                        row['protocol'],
-                        row['pool_id'],
-                        row['rating'],
-                        row['roi'],
-                        row['strategy_rating']
-                    )
-                )
+            # Check for mandatory 'id' column
+            if 'id' not in data.columns:
+                raise ValueError("The 'id' column is required in the CSV file.")
+
+            # Find the intersection of valid columns and the CSV file columns
+            available_columns = [col for col in valid_columns if col in data.columns]
+            col_str = ", ".join(available_columns)
+            placeholders = ", ".join(["%s"] * len(available_columns))
+            query = f"INSERT INTO ratings.pools ({col_str}) VALUES ({placeholders});"
+
+            # Insert data dynamically
+            for row in data[available_columns].itertuples(index=False, name=None):
+                cursor.execute(query, row)
+
             conn.commit()
             logging.info("Pools table updated successfully.")
     except Exception as e:
